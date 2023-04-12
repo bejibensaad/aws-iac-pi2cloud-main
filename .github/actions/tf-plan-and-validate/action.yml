@@ -1,0 +1,64 @@
+name: '⭐ Terraform validate & plan composite action'
+description: 'Composite action to run terraform validate & plan command on the given layer'
+
+inputs:
+  terraform_version:
+    description: 'version of terraform to install'
+    required: true
+  environment:
+    description: 'name of the environment to create resources in'
+    required: true
+  region:
+    description: 'name of the resource group to create resources in'
+    required: true
+  bucket_name:
+    description: 'name of the storage account to store tfstate in'
+    required: true
+  dynamodb_table_name:
+    description: 'name of the container to store tfstate in'
+    required: true
+  encrypted:
+    description: 'whether the bucket is encrypted'
+    required: false
+    default: "true"
+  kms_key_id:
+    description: 'name of the kms key used to encrypt the bucket'
+    required: false
+    default: ""
+  layer:
+    description: 'name of the layer to run terraform apply in'
+    required: true
+  working_directory:
+    description: 'root path of tf layers (end without / ")'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install terrraform
+      uses: hashicorp/setup-terraform@v1
+      with:
+        terraform_version: ${{ inputs.terraform_version }}
+        terraform_wrapper: false
+
+    - name: Terraform Init
+      shell: bash
+      run: |
+        terraform init -input=false \
+            -backend-config="region=${{ inputs.region }}" \
+            -backend-config="bucket=${{ inputs.bucket_name }}" \
+            -backend-config="dynamodb_table=${{ inputs.dynamodb_table_name }}" \
+            -backend-config="encrypt=${{ inputs.encrypted }}" \
+            -backend-config="kms_key_id=${{ inputs.kms_key_id }}" \
+            -backend-config="key=${{ inputs.layer }}.tfstate"
+      working-directory: ${{ inputs.working_directory }}/${{ inputs.layer }}
+
+    - name: Terraform validate
+      run: terraform validate
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}/${{ inputs.layer }}
+
+    - name: Terraform Plan
+      shell: bash
+      run: terraform plan -input=false -var-file="tfvars/${{ inputs.region }}/shared.tfvars" -var-file="tfvars/${{ inputs.region }}/${{ inputs.environment }}.tfvars"
+      working-directory: ${{ inputs.working_directory }}/${{ inputs.layer }}

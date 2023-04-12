@@ -1,0 +1,225 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Create Terraform remote state resources.'
+
+# CloudFormation parameter UI definitions
+Metadata:
+  Identifier:
+    Value: terraform-init
+  Input:
+    Description: 'AWS Resources for Terraform'
+  Output:
+    Description: 'Name of all deployed resources'
+
+# Template parameters to be configured by user
+Parameters:
+  S3AccessLogBucketName:
+    Description: 'Name of S3 access logging bucket.'
+    Type: String
+    Default: ''
+    MaxLength: '128'
+    AllowedPattern: "[a-zA-Z0-9_-]*"
+    ConstraintDescription: 'Can contain only alphanumeric characters, dashes and underscores up to 128 characters.'
+  TerraformBucketName:
+    Description: 'Terraform remote state bucket name.'
+    Type: String
+    Default: ''
+    MaxLength: '128'
+    AllowedPattern: "[a-zA-Z0-9_-]*"
+    ConstraintDescription: 'Can contain only alphanumeric characters, dashes and underscores up to 128 characters.'
+  TerraformBucketEncryptionAlgorithm:
+    Description: "The S3 bucket encryption algorithm to use: AES256 (default) | aws:kms"
+    Type: 'String'
+    Default: 'AES256'
+    AllowedValues:
+      - 'AES256'
+      - 'aws:kms'
+  TerraformBucketKMSMasterKeyID:
+    Description: 'The KMS key ID to use for the encryption if TerraformBucketEncryptionAlgorithm specified is aws:kms. If no value is set, the default s3 kms will be used'
+    Type: 'String'
+    Default: ''
+  TerraformTableName:
+    Description: 'Name of Terraform DynamoDB table for concurrency control.'
+    Type: String
+    Default: ''
+    MaxLength: '255'
+    AllowedPattern: "[a-zA-Z0-9_.-]*"
+    ConstraintDescription: 'Can contain only alphanumeric characters, dashes, periods, and underscores up to 255 characters.'
+
+# Defined circumstances for using parameters
+Conditions:
+  CreateTFBucket: !And
+    - !Not [!Equals [!Ref TerraformBucketName, '']]
+    - !Equals [!Ref S3AccessLogBucketName, '']
+  EnableS3AccessLogging: !Not [!Equals [!Ref S3AccessLogBucketName, '']]
+  CreateTFBucketWithLogging: !And
+    - !Not [!Equals [!Ref TerraformBucketName, '']]
+    - !Not [!Equals [!Ref S3AccessLogBucketName, '']]
+  CreateTFTable: !Not [!Equals [!Ref TerraformTableName, '']]
+  UseKMS: !Equals [!Ref TerraformBucketEncryptionAlgorithm, 'aws:kms']
+  UseCustomerManagedKMS: !And
+    - !Equals [!Ref TerraformBucketEncryptionAlgorithm, 'aws:kms']
+    - !Not [!Equals [!Ref TerraformBucketKMSMasterKeyID, '']]
+
+# Resources created or used
+Resources:
+  # Terraform state bucket without logging (option 1)
+  TFBucket:
+    Condition: CreateTFBucket
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: 'Retain'
+    Properties:
+      BucketName: !Sub "${TerraformBucketName}"
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - !If
+            - UseKMS
+            # Use KMS key
+            - ServerSideEncryptionByDefault:
+                !If
+                - UseCustomerManagedKMS
+                # Use customer managed KMS key
+                - SSEAlgorithm: !Ref TerraformBucketEncryptionAlgorithm
+                  KMSMasterKeyID: !Ref TerraformBucketKMSMasterKeyID
+                # Use default S3 KMS key of the account
+                - SSEAlgorithm: !Ref TerraformBucketEncryptionAlgorithm
+                  KMSMasterKeyID: !Sub
+                    - 'arn:aws:kms:${REGION}:${ACCOUNT_ID}:alias/aws/s3'
+                    - REGION: !Ref AWS::Region
+                      ACCOUNT_ID: !Ref AWS::AccountId
+              BucketKeyEnabled: true
+            # Use SSE-S3 key
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: !Ref TerraformBucketEncryptionAlgorithm
+              BucketKeyEnabled: true
+      Tags:
+        - Key: "app"
+          Value: "Terraform"
+
+  # Terraform state bucket with logging enabled (option 2)
+  TFBucketWithLogging:
+    Condition: CreateTFBucketWithLogging
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: 'Retain'
+    Properties:
+      BucketName: !Sub "${TerraformBucketName}"
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3AccessLogBucketName
+        LogFilePrefix: !Sub "${TerraformBucketName}/"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - !If
+            - UseKMS
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: !Ref TerraformBucketEncryptionAlgorithm
+                KMSMasterKeyID: !Ref TerraformBucketKMSMasterKeyID
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: !Ref TerraformBucketEncryptionAlgorithm
+      Tags:
+        - Key: "app"
+          Value: "Terraform"
+
+  # Terraform bucket policy to be used on TFBucketWithLogging or TFBucket
+  TFBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !If [CreateTFBucketWithLogging, !Ref TFBucketWithLogging, !Ref TFBucket]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 'TerraformListBucket'
+            Effect: 'Allow'
+            Principal:
+              AWS: !Sub '${AWS::AccountId}'
+            Action:
+              - 's3:ListBucket'
+            Resource: !If [CreateTFBucketWithLogging, !GetAtt 'TFBucketWithLogging.Arn', !GetAtt 'TFBucket.Arn']
+          - Sid: 'TerraformAllowObjectOperations'
+            Effect: 'Allow'
+            Principal:
+              AWS: !Sub '${AWS::AccountId}'
+            Action:
+              - 's3:GetObject'
+              - 's3:PutObject'
+            Resource: !If [CreateTFBucketWithLogging, !Sub '${TFBucketWithLogging.Arn}/*', !Sub '${TFBucket.Arn}/*']
+          - Sid: 'EnforceMFADelete'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:DeleteObject*'
+            Resource: !If [CreateTFBucketWithLogging, !Sub '${TFBucketWithLogging.Arn}/*', !Sub '${TFBucket.Arn}/*']
+            Condition:
+              'Null':
+                'aws:MultiFactorAuthAge': 'true'
+          - Sid: 'Enforce SSL'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:*'
+            Resource:
+              - !If [CreateTFBucketWithLogging, !Sub '${TFBucketWithLogging.Arn}/*', !Sub '${TFBucket.Arn}']
+              - !If [CreateTFBucketWithLogging, !Sub '${TFBucketWithLogging.Arn}/*', !Sub '${TFBucket.Arn}/*']
+            Condition:
+              'Bool':
+                'aws:SecureTransport': 'false'
+
+  # Terraform DynamoDB state locking table
+  TFDDBTable:
+    Type: "AWS::DynamoDB::Table"
+    Condition: CreateTFTable
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: "LockID"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "LockID"
+          KeyType: "HASH"
+      ProvisionedThroughput:
+        ReadCapacityUnits: "1"
+        WriteCapacityUnits: "1"
+      TableName: !Ref TerraformTableName
+      Tags:
+        - Key: "app"
+          Value: "Terraform"
+        - Key: "Name"
+          Value: !Ref TerraformTableName
+
+# Outputs useful in other templates or to user
+Outputs:
+  TemplateVersion:
+    Description: "Template version."
+    Value: '1.0.0'
+  TerraformBucket:
+    Condition: CreateTFBucket
+    Description: "Name of Terraform remote state bucket."
+    Value: !Ref TFBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-TFStateBucket"
+  TerraformBucketWithLogging:
+    Condition: CreateTFBucketWithLogging
+    Description: "Name of Terraform remote state bucket with access logging."
+    Value: !Ref TFBucketWithLogging
+    Export:
+      Name: !Sub "${AWS::StackName}-TFStateBucket"
+  TerraformTable:
+    Condition: CreateTFTable
+    Description: "Name of DynamoDB table to handle Terraform concurrency locks."
+    Value: !Ref TFDDBTable
+    Export:
+      Name: !Sub "${AWS::StackName}-TFTable"

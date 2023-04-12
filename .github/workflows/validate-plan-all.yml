@@ -1,0 +1,89 @@
+---
+name: '🚀 Plan and validate all terraform'
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        type: choice
+        description: 'Env'
+        required: true
+        options:
+          - dev
+          #- prod
+
+concurrency:
+  group: plan-and-validate-all
+
+env:
+  TERRAFORM_VERSION: 1.1.6
+  AWS_REGION: eu-central-1
+  TERRAFORM_WORKING_DIRECTORY_ENVS: "app/stacks/"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  validate-all:
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.event.inputs.env }}
+    strategy:
+      max-parallel: 1
+      fail-fast: true
+      matrix:
+        layer: [
+          'iac-rbac',
+          'iac-registry',
+          'iac-storage',
+          'iac-lambda',
+          'iac-compute',
+        ]
+    env:
+      ACCOUNT_NUMBER: ${{ secrets.AWS_ACCOUNT_NUMBER }}
+      ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      CLOUD_FORMATION_STACK_NAME: cfn-terraform-backend-pi2cloud
+      TF_BUCKET_NAME: s3-terraform-backend-pi2cloud
+      TF_DYNAMODB_TABLENAME: ddb-terraform-locks-pi2cloud
+      KMS_KEY_NAME: alias/aws/s3
+    steps:       
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Login to AWS
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+          role-skip-session-tagging: true
+          role-session-name: terraform-plan
+
+      - name: Generate token for GitHub App over HTTPS
+        id: generate-token
+        uses: getsentry/action-github-app-token@v1
+        with:
+          app_id: ${{ secrets.UNIVERSAL_GH_APP_ID_CODE }}
+          private_key: ${{ secrets.UNIVERSAL_GH_APP_PRIVATE_KEY_CODE }}
+
+      - name: Configure GitHub over HTTPS
+        run: |
+          git config --global --replace-all url."https://foo:${GH_TOKEN}@github.com/TotalEnergiesCode".insteadOf "ssh://git@github.com/TotalEnergiesCode"
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+      
+      - name: terraform plan and validate
+        uses: ./.github/actions/tf-plan-and-validate
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          environment: ${{ github.event.inputs.env }}
+          region: ${{ env.AWS_REGION }}
+          bucket_name: ${{ env.TF_BUCKET_NAME }}
+          dynamodb_table_name: ${{ env.TF_DYNAMODB_TABLENAME }}
+          encrypted: true
+          kms_key_id: ${{ env.KMS_KEY_NAME }}
+          layer: ${{ matrix.layer }}
+          working_directory: ${{ env.TERRAFORM_WORKING_DIRECTORY_ENVS }}

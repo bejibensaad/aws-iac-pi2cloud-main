@@ -1,0 +1,58 @@
+---
+name: '🔥 Bootstrap terraform backend'
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        type: choice
+        description: 'Env'
+        required: true
+        options:
+          - dev
+          #- prod
+
+concurrency:
+  group: environment-bootstrap
+
+env:
+  AWS_REGION: eu-central-1
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy-tf-backend-dev:
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.event.inputs.env }}
+    env:
+      ACCOUNT_NUMBER: ${{ secrets.AWS_ACCOUNT_NUMBER }}
+      ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      CLOUD_FORMATION_STACK_NAME: cfn-terraform-backend-pi2cloud
+      TF_BUCKET_NAME: s3-terraform-backend-pi2cloud
+      TF_DYNAMODB_TABLENAME: ddb-terraform-locks-pi2cloud
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Login to AWS
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+          role-skip-session-tagging: true
+          role-session-name: bootstrap
+
+      - name: Create terraform backend components
+        run: |
+          aws cloudformation deploy \
+            --stack-name $CLOUD_FORMATION_STACK_NAME \
+            --template-file cicd-tools/cloudformation/bootstrap/terraform-backend.cfn.yml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+                TerraformBucketName=$TF_BUCKET_NAME \
+                TerraformBucketEncryptionAlgorithm=aws:kms \
+                TerraformTableName=$TF_DYNAMODB_TABLENAME \
+            --region $AWS_REGION
