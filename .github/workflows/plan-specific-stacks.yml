@@ -74,7 +74,7 @@ jobs:
 
       - name: Configure GitHub over HTTPS
         run: |
-          git config --global --replace-all url."https://foo:${GH_TOKEN}@github.com/TotalEnergiesCode".insteadOf "ssh://git@github.com/TotalEnergiesCode"
+          git config --global --replace-all url."https://foo:${GH_TOKEN}@github.com/bejibensaad".insteadOf "ssh://git@github.com/bejibensaad"
         env:
           GH_TOKEN: ${{ steps.generate-token.outputs.token }}
       
